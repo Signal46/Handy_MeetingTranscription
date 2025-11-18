@@ -9,6 +9,7 @@ mod managers;
 mod overlay;
 mod settings;
 mod shortcut;
+mod transcription_job;
 mod tray;
 mod utils;
 
@@ -115,6 +116,15 @@ fn initialize_core_logic(app_handle: &AppHandle) {
     app_handle.manage(model_manager.clone());
     app_handle.manage(transcription_manager.clone());
     app_handle.manage(history_manager.clone());
+
+    let job_manager = Arc::new(managers::job::TranscriptionJobManager::new(
+        app_handle,
+        transcription_manager.clone(),
+    ));
+    app_handle.manage(job_manager);
+
+    let meeting_recorder = Arc::new(Mutex::new(managers::meeting_recorder::MeetingRecorder::new()));
+    app_handle.manage(meeting_recorder);
 
     // Initialize the shortcuts
     shortcut::init_shortcuts(app_handle);
@@ -361,7 +371,12 @@ pub fn run() {
             commands::history::get_audio_file_path,
             commands::history::delete_history_entry,
             commands::history::update_history_limit,
-            commands::history::update_recording_retention_period
+            commands::history::update_recording_retention_period,
+            commands::jobs::start_file_recording,
+            commands::jobs::stop_file_recording,
+            commands::jobs::import_audio_file,
+            commands::jobs::get_job_queue,
+            commands::jobs::cancel_transcription_job
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

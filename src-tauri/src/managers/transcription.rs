@@ -2,6 +2,7 @@ use crate::audio_toolkit::apply_custom_words;
 use crate::managers::model::{EngineType, ModelManager};
 use crate::settings::{get_settings, ModelUnloadTimeout};
 use anyhow::Result;
+use hound;
 use log::{debug, error, info, warn};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -25,6 +26,13 @@ pub struct ModelStateEvent {
     pub model_id: Option<String>,
     pub model_name: Option<String>,
     pub error: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct TranscriptionProgressEvent {
+    pub job_id: String,
+    pub progress: f32,
+    pub text_segment: String,
 }
 
 enum LoadedEngine {
@@ -302,37 +310,10 @@ impl TranscriptionManager {
         current_model.clone()
     }
 
-    pub fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
-        // Update last activity timestamp
-        self.last_activity.store(
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
-            Ordering::Relaxed,
-        );
-
-        let st = std::time::Instant::now();
-
-        debug!("Audio vector length: {}", audio.len());
-
-        if audio.len() == 0 {
-            debug!("Empty audio vector");
+    fn transcribe_samples_internal(&self, audio: &[f32]) -> Result<String> {
+        if audio.is_empty() {
+            debug!("Empty audio chunk");
             return Ok(String::new());
-        }
-
-        // Check if model is loaded, if not try to load it
-        {
-            // If the model is loading, wait for it to complete.
-            let mut is_loading = self.is_loading.lock().unwrap();
-            while *is_loading {
-                is_loading = self.loading_condvar.wait(is_loading).unwrap();
-            }
-
-            let engine_guard = self.engine.lock().unwrap();
-            if engine_guard.is_none() {
-                return Err(anyhow::anyhow!("Model is not loaded for transcription."));
-            }
         }
 
         // Get current settings for configuration
@@ -360,7 +341,7 @@ impl TranscriptionManager {
                     };
 
                     whisper_engine
-                        .transcribe_samples(audio, Some(params))
+                        .transcribe_samples(audio.to_vec(), Some(params))
                         .map_err(|e| anyhow::anyhow!("Whisper transcription failed: {}", e))?
                 }
                 LoadedEngine::Parakeet(parakeet_engine) => {
@@ -370,7 +351,7 @@ impl TranscriptionManager {
                     };
 
                     parakeet_engine
-                        .transcribe_samples(audio, Some(params))
+                        .transcribe_samples(audio.to_vec(), Some(params))
                         .map_err(|e| anyhow::anyhow!("Parakeet transcription failed: {}", e))?
                 }
             }
@@ -387,7 +368,140 @@ impl TranscriptionManager {
             result.text
         };
 
+        let final_result = corrected_result.trim().to_string();
+
+        if final_result.is_empty() {
+            info!("Transcription result for chunk is empty");
+        } else {
+            info!("Transcription chunk result: {}", final_result);
+        }
+
+        Ok(final_result)
+    }
+
+    pub fn transcribe_file(&self, job_id: &str, file_path: &std::path::Path) -> Result<String> {
+        // Update last activity timestamp
+        self.last_activity.store(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+            Ordering::Relaxed,
+        );
+        let st = std::time::Instant::now();
+
+        // Check if model is loaded, if not try to load it
+        {
+            // If the model is loading, wait for it to complete.
+            let mut is_loading = self.is_loading.lock().unwrap();
+            while *is_loading {
+                is_loading = self.loading_condvar.wait(is_loading).unwrap();
+            }
+
+            let engine_guard = self.engine.lock().unwrap();
+            if engine_guard.is_none() {
+                return Err(anyhow::anyhow!("Model is not loaded for transcription."));
+            }
+        }
+
+        let mut reader = hound::WavReader::open(file_path)?;
+        let spec = reader.spec();
+        if spec.sample_rate != 16000 || spec.channels != 1 {
+            return Err(anyhow::anyhow!(
+                "Unsupported audio format. Expected 16kHz mono audio."
+            ));
+        }
+
+        let chunk_duration_secs = 30;
+        let chunk_size_samples = (spec.sample_rate as usize) * chunk_duration_secs;
+        let num_samples = reader.duration() as usize;
+        let mut samples_processed = 0;
+
+        let mut full_text = String::new();
+        let mut samples_iter = reader.samples::<i16>();
+
+        loop {
+            let chunk_i16: Vec<i16> = samples_iter
+                .by_ref()
+                .take(chunk_size_samples)
+                .collect::<Result<Vec<_>, _>>()?;
+
+            if chunk_i16.is_empty() {
+                break;
+            }
+
+            let audio_chunk_f32: Vec<f32> =
+                chunk_i16.iter().map(|s| *s as f32 / 32767.0).collect();
+
+            let result_text = self.transcribe_samples_internal(&audio_chunk_f32)?;
+
+            if !result_text.is_empty() {
+                full_text.push_str(&result_text);
+                full_text.push(' ');
+            }
+
+            samples_processed += chunk_i16.len();
+            let progress = samples_processed as f32 / num_samples as f32;
+
+            let _ = self
+                .app_handle
+                .emit("transcription-progress", TranscriptionProgressEvent {
+                    job_id: job_id.to_string(),
+                    progress,
+                    text_segment: result_text,
+                });
+        }
+
         let et = std::time::Instant::now();
+        info!(
+            "File transcription completed in {}ms",
+            (et - st).as_millis(),
+        );
+
+        // Check if we should immediately unload the model after transcription
+        let settings = get_settings(&self.app_handle);
+        if settings.model_unload_timeout == ModelUnloadTimeout::Immediately {
+            info!("Immediately unloading model after transcription");
+            if let Err(e) = self.unload_model() {
+                error!("Failed to immediately unload model: {}", e);
+            }
+        }
+
+        Ok(full_text.trim().to_string())
+    }
+
+    pub fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
+        // Update last activity timestamp
+        self.last_activity.store(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+            Ordering::Relaxed,
+        );
+
+        let st = std::time::Instant::now();
+
+        debug!("Audio vector length: {}", audio.len());
+
+        // Check if model is loaded, if not try to load it
+        {
+            // If the model is loading, wait for it to complete.
+            let mut is_loading = self.is_loading.lock().unwrap();
+            while *is_loading {
+                is_loading = self.loading_condvar.wait(is_loading).unwrap();
+            }
+
+            let engine_guard = self.engine.lock().unwrap();
+            if engine_guard.is_none() {
+                return Err(anyhow::anyhow!("Model is not loaded for transcription."));
+            }
+        }
+
+        let final_result = self.transcribe_samples_internal(&audio)?;
+
+        let et = std::time::Instant::now();
+        let settings = get_settings(&self.app_handle);
         let translation_note = if settings.translate_to_english {
             " (translated)"
         } else {
@@ -398,14 +512,6 @@ impl TranscriptionManager {
             (et - st).as_millis(),
             translation_note
         );
-
-        let final_result = corrected_result.trim().to_string();
-
-        if final_result.is_empty() {
-            info!("Transcription result is empty");
-        } else {
-            info!("Transcription result: {}", final_result);
-        }
 
         // Check if we should immediately unload the model after transcription
         if settings.model_unload_timeout == ModelUnloadTimeout::Immediately {

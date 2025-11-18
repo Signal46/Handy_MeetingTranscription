@@ -1,8 +1,9 @@
 import React from "react";
-import { Cog, FlaskConical, History, Info, Sparkles } from "lucide-react";
+import { Cog, FlaskConical, History, Info, Mic, Sparkles } from "lucide-react";
 import HandyTextLogo from "./icons/HandyTextLogo";
 import HandyHand from "./icons/HandyHand";
 import { useSettings } from "../hooks/useSettings";
+import Transcription from "./transcription/Transcription";
 import {
   GeneralSettings,
   AdvancedSettings,
@@ -64,6 +65,12 @@ export const SECTIONS_CONFIG = {
     label: "About",
     icon: Info,
     component: AboutSettings,
+    enabled: () => true,
+  },
+  transcription: {
+    label: "Transcription",
+    icon: Mic,
+    component: Transcription,
     enabled: () => true,
   },
 } as const satisfies Record<string, SectionConfig>;

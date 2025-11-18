@@ -15,6 +15,22 @@
     "global-shortcut:allow-unregister-all",
     "macos-permissions:default",
     "fs:read-files",
-    "fs:allow-resource-read-recursive"
+    "fs:allow-resource-read-recursive",
+    {
+      "identifier": "fs:allow-app-data-read",
+      "allow": [{ "path": "$APP_DATA/*" }]
+    },
+    {
+      "identifier": "fs:allow-app-data-write",
+      "allow": [{ "path": "$APP_DATA/*" }]
+    },
+    {
+      "identifier": "fs:allow-app-temp-read",
+      "allow": [{ "path": "$APP_TEMP/*" }]
+    },
+    {
+      "identifier": "fs:allow-app-temp-write",
+      "allow": [{ "path": "$APP_TEMP/*" }]
+    }
   ]
 }

@@ -17,7 +17,7 @@ const renderSettingsContent = (section: SidebarSection) => {
 function App() {
   const [showOnboarding, setShowOnboarding] = useState<boolean | null>(null);
   const [currentSection, setCurrentSection] =
-    useState<SidebarSection>("general");
+    useState<SidebarSection>("transcription");
   const { settings, updateSetting } = useSettings();
 
   useEffect(() => {
